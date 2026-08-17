@@ -1364,9 +1364,16 @@ struct CvodeSimulator::Impl {
         }
     };
     SegmentCounters closed_segments;
+    // True only after CVodeSensInit1 succeeded for the CURRENT run. The
+    // SensitivityState is a per-run local threaded by reference, so segment
+    // bookkeeping (which sees only cvode_mem) needs this to know whether the
+    // CVODES sens counters exist -- querying them unactivated returns
+    // CV_NO_SENS *and* fires the SUNDIALS error logger, two stderr lines per
+    // segment.
+    bool sens_cvodes_active = false;
 
     // The counters CVODE has accumulated since its last (re-)initialization.
-    static SegmentCounters read_segment_counters(void *cvode_mem);
+    static SegmentCounters read_segment_counters(void *cvode_mem, bool sens_active);
 
     // The one way to re-initialize CVODE mid-run: banks the closing segment's
     // counters before CVodeReInit zeroes them (issue #182), then re-inits.
@@ -2147,6 +2154,7 @@ Result CvodeSimulator::Impl::run_warm(const TimeSpec &times, const SolverOptions
     // (Nothing re-inits mid-run here — the warm path takes no events — so this
     // stays 0 through to record_solver_stats.)
     closed_segments = SegmentCounters{};
+    sens_cvodes_active = false;
 
     // And the same restart on the GH #336 witness, which the warm path's reused
     // user_data would otherwise carry across run()s: a step an earlier run
@@ -2436,6 +2444,7 @@ void CvodeSimulator::Impl::create_cvode_core(const TimeSpec &times, const Solver
     // Fresh CVODE memory, so its own counters start at 0; the carried half of
     // the run's totals is an Impl member and has to be cleared (issue #182).
     closed_segments = SegmentCounters{};
+    sens_cvodes_active = false;
 
     // Tracking (issue #213) is decided here rather than in run(), so the two
     // statements that have to agree — the spec the callback reads and the
@@ -2923,6 +2932,7 @@ void CvodeSimulator::Impl::setup_forward_sensitivities(
         throw std::runtime_error("CVodeSensInit1 failed: " + std::to_string(flag));
     }
 
+    sens_cvodes_active = true;
     // ── Scale-aware sensitivity error control (GH #214) ──────────────────
     // bngsim integrates concentrations (= amount / V_compartment). For the
     // sub-picoliter compartments of real cell-biology models, 1/V reaches
@@ -3484,7 +3494,7 @@ void CvodeSimulator::Impl::allocate_run_result(Result &result, const SolverOptio
 }
 
 // ─── Solver statistics ───────────────────────────────────────────────────────
-CvodeSimulator::Impl::SegmentCounters CvodeSimulator::Impl::read_segment_counters(void *cvode_mem) {
+CvodeSimulator::Impl::SegmentCounters CvodeSimulator::Impl::read_segment_counters(void *cvode_mem, bool sens_active) {
     SegmentCounters c;
     CVodeGetNumSteps(cvode_mem, &c.steps);
     CVodeGetNumRhsEvals(cvode_mem, &c.rhs_evals);
@@ -3492,11 +3502,16 @@ CvodeSimulator::Impl::SegmentCounters CvodeSimulator::Impl::read_segment_counter
     CVodeGetNumNonlinSolvIters(cvode_mem, &c.nonlin_iters);
     CVodeGetNumNonlinSolvConvFails(cvode_mem, &c.nonlin_conv_fails);
     CVodeGetNumErrTestFails(cvode_mem, &c.err_test_fails);
-    // Both return CV_NO_SENS on a run without forward sensitivities, leaving
-    // the fields at 0 — which is the honest answer there, so the flag is
-    // deliberately not checked.
-    CVodeGetSensNumNonlinSolvConvFails(cvode_mem, &c.sens_conv_fails);
-    CVodeGetSensNumErrTestFails(cvode_mem, &c.sens_err_test_fails);
+    // Both return CV_NO_SENS on a run without forward sensitivities and leave
+    // the fields at 0 — but under SUNDIALS 7 that return path ALSO fires the
+    // error logger, two stderr lines per segment. A particle filter making
+    // ~1e5 short segment runs per fit produced ~48 MB of log spam and an
+    // order-of-magnitude wall-clock hit from pipe flushing alone. So the flag
+    // IS checked now; the fields stay 0 without sensitivities, same as before.
+    if (sens_active) {
+        CVodeGetSensNumNonlinSolvConvFails(cvode_mem, &c.sens_conv_fails);
+        CVodeGetSensNumErrTestFails(cvode_mem, &c.sens_err_test_fails);
+    }
     return c;
 }
 
@@ -3504,7 +3519,7 @@ int CvodeSimulator::Impl::reinit_cvode(void *cvode_mem, sunrealtype t, N_Vector 
     // Bank what this segment cost before CVodeReInit zeroes every counter
     // (cvodes.c "Initialize all the counters"), so the run's totals survive the
     // restart — issue #182.
-    closed_segments += read_segment_counters(cvode_mem);
+    closed_segments += read_segment_counters(cvode_mem, sens_cvodes_active);
     return CVodeReInit(cvode_mem, t, y);
 }
 
@@ -3514,7 +3529,7 @@ void CvodeSimulator::Impl::record_solver_stats(void *cvode_mem, SUNLinearSolver 
     // (issue #182). Without the carried half, a model with events reports only
     // the tail after its last fire.
     SegmentCounters total = closed_segments;
-    total += read_segment_counters(cvode_mem);
+    total += read_segment_counters(cvode_mem, sens_cvodes_active);
 
     result.solver_stats().n_steps = static_cast<int>(total.steps);
     result.solver_stats().n_rhs_evals = static_cast<int>(total.rhs_evals);
