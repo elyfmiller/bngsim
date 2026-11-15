@@ -1,0 +1,124 @@
+# One-off clean-machine pass for lanl/bngsim#1694, on a branch of a fork only:
+# bngsim 0.17.2 from PyPI into a fresh venv on Python 3.13, then the issue's
+# six steps. Every step prints a RESULT line; a failing step does not stop the
+# rest, since each failure is a finding.
+name: pass-1694
+on:
+  push:
+    branches: [ci/1694-clean-machine-pass]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x86_64 (python:3.13-slim)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: python:3.13-slim
+    env:
+      PASS_HOST_NOTE: python:3.13-slim container on ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 1 install bngsim
+        continue-on-error: true
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install --no-cache-dir bngsim==0.17.2 2>&1 | tail -3
+          /tmp/v/bin/python ci/pass_1694.py wheel
+      - name: 2 front-door examples (v0.17.2 and main)
+        continue-on-error: true
+        run: |
+          /tmp/v/bin/python ci/pass_1694.py examples v0.17.2
+          /tmp/v/bin/python ci/pass_1694.py examples main
+      - name: 3 ODE and SSA runs
+        continue-on-error: true
+        run: /tmp/v/bin/python ci/pass_1694.py runs
+      - name: 4 sensitivities without a C compiler
+        continue-on-error: true
+        run: |
+          command -v cc gcc || echo "no cc or gcc on PATH"
+          /tmp/v/bin/python ci/pass_1694.py sens without-compiler
+      - name: 4 sensitivities with gcc
+        continue-on-error: true
+        run: |
+          apt-get update -qq && apt-get install -y -qq gcc > /dev/null
+          /tmp/v/bin/python ci/pass_1694.py sens with-gcc
+      - name: 5 the bngl extra and from_bngl
+        continue-on-error: true
+        run: |
+          /tmp/v/bin/pip install --no-cache-dir 'bngsim[bngl]==0.17.2' 2>&1 | tail -2
+          command -v perl || echo "no perl on PATH"
+          /tmp/v/bin/python ci/pass_1694.py bngl
+      - name: 6 the antimony and pandas extras
+        continue-on-error: true
+        run: |
+          /tmp/v/bin/pip install --no-cache-dir 'bngsim[antimony,pandas]==0.17.2' 2>&1 | tail -2
+          /tmp/v/bin/python ci/pass_1694.py extras
+
+  windows:
+    name: Windows x86_64 (Python 3.13)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PASS_HOST_NOTE: windows-latest runner, setup-python 3.13
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 1 install bngsim
+        continue-on-error: true
+        run: |
+          python -m venv C:\v
+          C:\v\Scripts\pip install --no-cache-dir bngsim==0.17.2 2>&1 | Select-Object -Last 3
+          C:\v\Scripts\python ci\pass_1694.py wheel
+      - name: 2 front-door examples (v0.17.2 and main)
+        continue-on-error: true
+        run: |
+          C:\v\Scripts\python ci\pass_1694.py examples v0.17.2
+          C:\v\Scripts\python ci\pass_1694.py examples main
+      - name: 3 ODE and SSA runs
+        continue-on-error: true
+        run: C:\v\Scripts\python ci\pass_1694.py runs
+      - name: 4 sensitivities with no compiler on PATH
+        continue-on-error: true
+        run: |
+          $env:PATH = "C:\v\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
+          Get-Command cl, gcc -ErrorAction SilentlyContinue | ForEach-Object { $_.Source }
+          C:\v\Scripts\python -c "import shutil; print('which cl:', shutil.which('cl'), '| which gcc:', shutil.which('gcc'))"
+          C:\v\Scripts\python ci\pass_1694.py sens no-compiler-on-path
+      - name: 4 sensitivities on the runner's default PATH
+        continue-on-error: true
+        run: |
+          Get-Command cl, gcc -ErrorAction SilentlyContinue | ForEach-Object { $_.Source }
+          C:\v\Scripts\python -c "import shutil; print('which cl:', shutil.which('cl'), '| which gcc:', shutil.which('gcc'))"
+          C:\v\Scripts\python ci\pass_1694.py sens runner-default-path
+      - name: 4 sensitivities with MSVC (vcvars64)
+        continue-on-error: true
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VSPATH=%%i"
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" > nul
+          where cl
+          C:\v\Scripts\python -c "import shutil; print('which cl:', shutil.which('cl'))"
+          C:\v\Scripts\python ci\pass_1694.py sens with-msvc
+      - name: 5 the bngl extra; from_bngl with no Perl on PATH, then the runner's Perl
+        continue-on-error: true
+        run: |
+          C:\v\Scripts\pip install --no-cache-dir "bngsim[bngl]==0.17.2" 2>&1 | Select-Object -Last 2
+          $full = $env:PATH
+          $env:PATH = "C:\v\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
+          Get-Command perl -ErrorAction SilentlyContinue | ForEach-Object { $_.Source }
+          C:\v\Scripts\python ci\pass_1694.py bngl
+          $env:PATH = $full
+          Get-Command perl -ErrorAction SilentlyContinue | ForEach-Object { $_.Source }
+          C:\v\Scripts\python ci\pass_1694.py bngl
+      - name: 6 the antimony and pandas extras
+        continue-on-error: true
+        run: |
+          C:\v\Scripts\pip install --no-cache-dir "bngsim[antimony,pandas]==0.17.2" 2>&1 | Select-Object -Last 2
+          C:\v\Scripts\python ci\pass_1694.py extras
