@@ -1,0 +1,57 @@
+# Diagnosis of the two Linux failures in the lanl/bngsim#1694 pass (fork branch only):
+# from_bngl ("BEGIN failed ... BNG2.pl line 34") and the libexpat.so.1 ImportError,
+# both on python:3.13-slim. Each check runs on the stock image, then again after
+# installing the one Debian package suspected for it.
+name: diag-1694
+on:
+  push:
+    branches: [ci/1694-clean-machine-pass]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+
+jobs:
+  linux-slim:
+    name: Linux x86_64 (python:3.13-slim) diagnosis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: python:3.13-slim
+    steps:
+      - uses: actions/checkout@v4
+      - name: install bngsim 0.17.2 with the bngl, antimony and pandas extras
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install --no-cache-dir 'bngsim[bngl,antimony,pandas]==0.17.2' 2>&1 | tail -2
+          /tmp/v/bin/pip list 2>/dev/null | grep -iE '^(bngsim|python-libsbml|antimony|bionetgen|pandas|numpy) '
+      - name: the image as shipped
+        continue-on-error: true
+        env:
+          DIAG_LABEL: stock image
+        run: |
+          echo "perl: $(command -v perl || echo none)"; dpkg -S "$(readlink -f "$(command -v perl)")" || true
+          dpkg -l | awk '/^ii/ && $2 ~ /^(perl|perl-base|perl-modules|libexpat1|libxml2)/ {print $2, $3}'
+          rc=0; perl -MFindBin -e 1 || rc=$?; echo "perl -MFindBin -e 1: exit $rc"
+          ls -l /usr/lib/x86_64-linux-gnu/libexpat* 2>&1 || true
+          ldconfig -p | grep -i expat || echo "ldconfig: no expat"
+          PYEXPAT=$(/tmp/v/bin/python -c "import pyexpat; print(getattr(pyexpat, '__file__', 'built-in'))")
+          echo "pyexpat: $PYEXPAT"; [ -f "$PYEXPAT" ] && ldd "$PYEXPAT" | grep -iE 'expat|not found' || echo "pyexpat links no shared libexpat"
+          /tmp/v/bin/python ci/diag_1694.py libs sbml antimony bngl dataframe
+      - name: after apt-get install libexpat1
+        continue-on-error: true
+        env:
+          DIAG_LABEL: with libexpat1
+        run: |
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends libexpat1 > /dev/null
+          dpkg -l | awk '/^ii/ && $2 ~ /^libexpat1/ {print $2, $3}'
+          ls -l /usr/lib/x86_64-linux-gnu/libexpat* 2>&1 || true
+          ldconfig -p | grep -i expat || echo "ldconfig: no expat"
+          /tmp/v/bin/python ci/diag_1694.py libs sbml antimony
+      - name: after apt-get install perl
+        continue-on-error: true
+        env:
+          DIAG_LABEL: with perl
+        run: |
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends perl > /dev/null
+          dpkg -l | awk '/^ii/ && $2 ~ /^(perl|perl-modules)/ {print $2, $3}'
+          rc=0; perl -MFindBin -e 1 || rc=$?; echo "perl -MFindBin -e 1: exit $rc"
+          /tmp/v/bin/python ci/diag_1694.py bngl
